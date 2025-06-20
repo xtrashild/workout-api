@@ -1,13 +1,17 @@
-// server.js
-import Database from "better-sqlite3";
+// server.js - Express server with Supabase
 import cors from "cors";
 import express from "express";
-import fs from "fs";
-import { dirname, join } from "path";
-import { fileURLToPath } from "url";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+import {
+  addExercise,
+  deleteExercise,
+  deleteWorkout,
+  getAllExercises,
+  getAllWorkoutDates,
+  getExerciseById,
+  getWorkoutByDate,
+  saveWorkout,
+  updateExercise,
+} from "./db.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -16,196 +20,145 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Database setup - using better-sqlite3 for simplicity
-const dbPath = join(__dirname, "data", "workout.sqlite");
-
-// Ensure data directory exists
-if (!fs.existsSync(join(__dirname, "data"))) {
-  fs.mkdirSync(join(__dirname, "data"), { recursive: true });
-}
-
-const db = new Database(dbPath);
-
-// Initialize tables if they don't exist
-db.exec(`
-  CREATE TABLE IF NOT EXISTS exercise (
-    id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    gif TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS workout (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    date TEXT NOT NULL,
-    exercise_id INTEGER NOT NULL,
-    duration INTEGER,
-    FOREIGN KEY (exercise_id) REFERENCES exercise (id)
-  );
-`);
-
-// API Routes
-
-// Get all exercises
-app.get("/api/exercises", (req, res) => {
+// Single API endpoint that matches your current frontend
+app.all("/api/workout", async (req, res) => {
   try {
-    const exercises = db.prepare("SELECT * FROM exercise ORDER BY id").all();
-    res.json(exercises);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
+    const { method, query, body } = req;
+    const { action, date, id } = query;
 
-// Get exercise by ID
-app.get("/api/exercises/:id", (req, res) => {
-  try {
-    const exercise = db
-      .prepare("SELECT * FROM exercise WHERE id = ?")
-      .get(req.params.id);
-    if (!exercise) {
-      return res.status(404).json({ error: "Exercise not found" });
+    switch (method) {
+      case "GET":
+        if (action === "exercises") {
+          const exercises = await getAllExercises();
+          return res.json(exercises);
+        }
+
+        if (action === "exercise" && id) {
+          const exercise = await getExerciseById(parseInt(id));
+          if (!exercise) {
+            return res.status(404).json({ error: "Exercise not found" });
+          }
+          return res.json(exercise);
+        }
+
+        if (action === "workout" && date) {
+          const workouts = await getWorkoutByDate(date);
+          return res.json(workouts);
+        }
+
+        if (action === "dates") {
+          const dates = await getAllWorkoutDates();
+          return res.json(dates);
+        }
+
+        return res
+          .status(400)
+          .json({ error: "Invalid action or missing parameters" });
+
+      case "POST":
+        if (action === "workout" && date) {
+          const { exercises } = body;
+          if (!exercises || !Array.isArray(exercises)) {
+            return res
+              .status(400)
+              .json({ error: "Exercises array is required" });
+          }
+
+          const result = await saveWorkout(date, exercises);
+          return res.json(result);
+        }
+
+        if (action === "exercise") {
+          const { name, gif } = body;
+          if (!name || !gif) {
+            return res
+              .status(400)
+              .json({ error: "Name and gif URL are required" });
+          }
+
+          const newExercise = await addExercise(name, gif);
+          return res.json(newExercise);
+        }
+
+        return res
+          .status(400)
+          .json({ error: "Invalid action or missing parameters" });
+
+      case "PUT":
+        if (action === "exercise" && id) {
+          const { name, gif } = body;
+          if (!name || !gif) {
+            return res
+              .status(400)
+              .json({ error: "Name and gif URL are required" });
+          }
+
+          const result = await updateExercise(parseInt(id), name, gif);
+          if (!result.updated) {
+            return res.status(404).json({ error: "Exercise not found" });
+          }
+          return res.json(result);
+        }
+
+        return res
+          .status(400)
+          .json({ error: "Invalid action or missing parameters" });
+
+      case "DELETE":
+        if (action === "workout" && date) {
+          const result = await deleteWorkout(date);
+          return res.json(result);
+        }
+
+        if (action === "exercise" && id) {
+          const result = await deleteExercise(parseInt(id));
+          if (!result.deleted) {
+            return res.status(404).json({ error: "Exercise not found" });
+          }
+          return res.json(result);
+        }
+
+        return res
+          .status(400)
+          .json({ error: "Invalid action or missing parameters" });
+
+      default:
+        return res.status(405).json({ error: "Method not allowed" });
     }
-    res.json(exercise);
   } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Add new exercise
-app.post("/api/exercises", (req, res) => {
-  try {
-    const { name, gif } = req.body;
-    const result = db
-      .prepare("INSERT INTO exercise (name, gif) VALUES (?, ?)")
-      .run(name, gif);
-    res.json({ id: result.lastInsertRowid, name, gif });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Update exercise
-app.put("/api/exercises/:id", (req, res) => {
-  try {
-    const { name, gif } = req.body;
-    const result = db
-      .prepare("UPDATE exercise SET name = ?, gif = ? WHERE id = ?")
-      .run(name, gif, req.params.id);
-    if (result.changes === 0) {
-      return res.status(404).json({ error: "Exercise not found" });
-    }
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Delete exercise
-app.delete("/api/exercises/:id", (req, res) => {
-  try {
-    // Check if exercise is used in workouts
-    const workoutCount = db
-      .prepare("SELECT COUNT(*) as count FROM workout WHERE exercise_id = ?")
-      .get(req.params.id);
-    if (workoutCount.count > 0) {
-      return res
-        .status(400)
-        .json({ error: "Cannot delete exercise that is used in workouts" });
-    }
-
-    const result = db
-      .prepare("DELETE FROM exercise WHERE id = ?")
-      .run(req.params.id);
-    if (result.changes === 0) {
-      return res.status(404).json({ error: "Exercise not found" });
-    }
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Get workout by date
-app.get("/api/workouts/:date", (req, res) => {
-  try {
-    const workouts = db
-      .prepare(
-        `
-      SELECT w.*, e.name, e.gif 
-      FROM workout w
-      JOIN exercise e ON w.exercise_id = e.id
-      WHERE w.date = ?
-      ORDER BY w.id
-    `
-      )
-      .all(req.params.date);
-    res.json(workouts);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Save workout
-app.post("/api/workouts", (req, res) => {
-  try {
-    const { date, exercises } = req.body;
-
-    // Start transaction
-    const transaction = db.transaction(() => {
-      // Delete existing workout for this date
-      db.prepare("DELETE FROM workout WHERE date = ?").run(date);
-
-      // Insert new workout exercises
-      const insertStmt = db.prepare(
-        "INSERT INTO workout (date, exercise_id, duration) VALUES (?, ?, ?)"
-      );
-      exercises.forEach((exercise) => {
-        insertStmt.run(date, exercise.id, exercise.duration);
-      });
-    });
-
-    transaction();
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Get all workout dates
-app.get("/api/workout-dates", (req, res) => {
-  try {
-    const dates = db
-      .prepare("SELECT DISTINCT date FROM workout ORDER BY date DESC")
-      .all();
-    res.json(dates.map((row) => row.date));
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Delete workout by date
-app.delete("/api/workouts/:date", (req, res) => {
-  try {
-    const result = db
-      .prepare("DELETE FROM workout WHERE date = ?")
-      .run(req.params.date);
-    res.json({ success: true, deletedRows: result.changes });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error("API Error:", error);
+    return res
+      .status(500)
+      .json({ error: error.message || "Internal server error" });
   }
 });
 
 // Health check
 app.get("/health", (req, res) => {
-  res.json({ status: "OK", timestamp: new Date().toISOString() });
+  res.json({
+    status: "OK",
+    timestamp: new Date().toISOString(),
+    provider: "supabase",
+    database: process.env.SUPABASE_URL ? "Connected" : "Not configured",
+  });
 });
 
-// Start server
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log(
+    `Supabase URL: ${
+      process.env.SUPABASE_URL ? "✅ Configured" : "❌ Not configured"
+    }`
+  );
+  console.log(
+    `Supabase Key: ${
+      process.env.SUPABASE_ANON_KEY ? "✅ Configured" : "❌ Not configured"
+    }`
+  );
 });
 
 // Graceful shutdown
-process.on("SIGINT", () => {
-  db.close();
+process.on("SIGINT", async () => {
+  console.log("Shutting down gracefully...");
   process.exit(0);
 });
